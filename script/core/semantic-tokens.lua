@@ -431,6 +431,7 @@ local Care = util.switch()
         }
     end)
     : case 'doc.extends.name'
+    : case 'doc.env.name'
     : call(function (source, options, results)
         if not options.annotation then
             return

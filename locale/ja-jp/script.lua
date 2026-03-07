@@ -370,6 +370,8 @@ PARSER_LUADOC_ERROR_DIAG_MODE           =
 '診断モードが正しくありません。'
 PARSER_LUADOC_MISS_LOCAL_NAME           =
 '変数名が不足しています。'
+PARSER_LUADOC_MISS_ENV_NAME             =
+'<環境クラス名> が必要です。'
 
 SYMBOL_ANONYMOUS        =
 '<匿名関数>'
@@ -1335,5 +1337,40 @@ local myDog = {}
 
 ---プロテクト関数のため子クラスからの使用が許可されています
 myDog:eyesCount();
+```
+]=]
+
+LUADOC_DESC_ENV =
+[=[
+Specify a custom environment class for a file, block, or function. Any global
+lookup within scope will be resolved against the named class instead of the
+standard global environment.
+
+If the class inherits from `_G` (e.g. `---@class myenv : _G`), all standard
+globals remain available. Without `_G` inheritance, only fields defined on the
+class are accessible as globals.
+
+## Syntax
+`@env <class_name>`
+
+## Usage
+### File-level sandbox
+```lua
+---@class myenv : _G
+---@field custom_var number
+
+---@env myenv
+print(custom_var) -- OK: custom_var is defined in myenv, print from _G
+```
+### Function-level sandbox (no _G)
+```lua
+---@class sandbox
+---@field log fun(msg: string)
+
+local function run()
+    ---@env sandbox
+    log("hello")  -- OK
+    print("hi")   -- undefined-global: print is not in sandbox
+end
 ```
 ]=]

@@ -1792,6 +1792,7 @@ local function tryluaDocCate(word, results)
         'operator',
         'source',
         'enum',
+        'env',
         'package',
         'private',
         'protected'
@@ -1850,7 +1851,27 @@ end
 
 ---@async
 local function tryluaDocBySource(state, position, source, results)
-    if     source.type == 'doc.extends.name' then
+    if     source.type == 'doc.env.name' then
+        local used = {}
+        for _, doc in ipairs(vm.getDocSets(state.uri)) do
+            local name = doc.type == 'doc.class' and doc.class[1]
+            if  name
+            and not used[name]
+            and matchKey(source[1], name) then
+                used[name] = true
+                results[#results+1] = {
+                    label    = name,
+                    kind     = define.CompletionItemKind.Class,
+                    textEdit = name:find '[^%w_]' and {
+                        start   = source.start,
+                        finish  = position,
+                        newText = name,
+                    },
+                }
+            end
+        end
+        return true
+    elseif source.type == 'doc.extends.name' then
         if source.parent.type == 'doc.class' then
             local used = {}
             for _, doc in ipairs(vm.getDocSets(state.uri)) do

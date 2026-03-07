@@ -908,6 +908,75 @@ function vm.bindAs(source)
     return false
 end
 
+---@param source parser.object
+---@return vm.global?
+local function getEnvType(source)
+    local root = guide.getRoot(source)
+    if not root then
+        return nil
+    end
+    local docs = root.docs
+    if not docs then
+        return nil
+    end
+
+    -- Build cache of env docs
+    if not docs._envCache then
+        docs._envCache = {}
+        for _, doc in ipairs(docs) do
+            if doc.type == 'doc.env' and doc.env then
+                docs._envCache[#docs._envCache+1] = doc
+            end
+        end
+    end
+
+    if #docs._envCache == 0 then
+        return nil
+    end
+
+    -- Walk up the function chain looking for an ---@env annotation covering source.
+    -- (a) bs == func       : annotation bound directly to the function node.
+    -- (b) bs inside func   : annotation bound to a statement in the function body.
+    local func = guide.getParentFunction(source)
+    while func and func.type ~= 'main' do
+        for _, doc in ipairs(docs._envCache) do
+            local bs = doc.bindSource
+            if bs then
+                if bs == func then
+                    return vm.getGlobal('type', doc.env[1])
+                end
+                if bs.type ~= 'function' and guide.getParentFunction(bs) == func then
+                    return vm.getGlobal('type', doc.env[1])
+                end
+            end
+        end
+        func = guide.getParentFunction(func)
+    end
+
+    -- File-level: skip docs bound to a function node to prevent
+    -- anonymous-function annotations from bleeding to the whole file.
+    for _, doc in ipairs(docs._envCache) do
+        local bs = doc.bindSource
+        if not bs then
+            return vm.getGlobal('type', doc.env[1])
+        end
+        if bs.type ~= 'function' then
+            local bsFunc = guide.getParentFunction(bs)
+            if not bsFunc or bsFunc.type == 'main' then
+                return vm.getGlobal('type', doc.env[1])
+            end
+        end
+    end
+
+    return nil
+end
+
+---@param source parser.object
+---@return vm.global?
+function vm.getEnvType(source)
+    return getEnvType(source)
+end
+
 ---@param source parser.object | vm.variable
 ---@param key string|vm.global|vm.ANY|vm.ANYDOC
 ---@return parser.object[] docedResults
@@ -1982,11 +2051,33 @@ local compilerSwitch = util.switch()
         if not source.node then
             return
         end
-        if source.node[1] ~= '_ENV' then
-            return
-        end
         local key = guide.getKeyName(source)
         if not key then
+            return
+        end
+        -- Resolve against the ---@env class when active. Falls through to
+        -- standard resolution only when the env class inherits _G.
+        if source.node.tag == '_ENV' then
+            local envType = getEnvType(source)
+            if envType then
+                local suri = guide.getUri(source)
+                local found = false
+                vm.getClassFields(suri, envType, key, function (field)
+                    vm.setNode(source, vm.compileNode(field), true)
+                    found = true
+                end)
+                if found or not vm.isSubType(suri, envType.name, '_G') then
+                    if not found then
+                        -- Not in env, no _G inheritance: clear the type so
+                        -- hover does not show the global's stale definition.
+                        vm.setNode(source, vm.createNode(), true)
+                    end
+                    return
+                end
+                -- env inherits _G: fall through
+            end
+        end
+        if source.node[1] ~= '_ENV' then
             return
         end
         vm.compileByParentNode(source.node, key, function (src)

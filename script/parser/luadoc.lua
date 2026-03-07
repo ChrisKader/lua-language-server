@@ -1726,6 +1726,26 @@ local docSwitch = util.switch()
             finish = getFinish(),
         }
     end)
+    : case 'env'
+    : call(function ()
+        local result = {
+            type   = 'doc.env',
+            start  = getFinish(),
+            finish = getFinish(),
+        }
+        local name = parseName('doc.env.name', result)
+        if not name then
+            pushWarning {
+                type   = 'LUADOC_MISS_ENV_NAME',
+                start  = getFinish(),
+                finish = getFinish(),
+            }
+            return nil
+        end
+        result.env    = name
+        result.finish = name.finish
+        return result
+    end)
 
 local function convertTokens(doc)
     local tp, text = nextToken()
@@ -1866,6 +1886,9 @@ local function isContinuedDoc(lastDoc, nextDoc)
         end
     end
     if nextDoc.type == 'doc.cast' then
+        return false
+    end
+    if nextDoc.type == 'doc.env' then
         return false
     end
     return true
@@ -2018,6 +2041,11 @@ local function bindDoc(source, binded)
         or     doc.type == 'doc.async'
         or     doc.type == 'doc.nodiscard' then
             if source.type == 'function' then
+                bindDocWithSource(doc, source)
+                ok = true
+            end
+        elseif doc.type == 'doc.env' then
+            if not isParam then
                 bindDocWithSource(doc, source)
                 ok = true
             end
@@ -2196,6 +2224,22 @@ local function bindDocWithSources(sources, binded)
     local suc = bindDocsBetween(sources, binded, guide.positionOf(row, 0), lastDoc.start)
     if not suc then
         bindDocsBetween(sources, binded, guide.positionOf(row + 1, 0), guide.positionOf(row + 2, 0))
+    end
+    -- Fallback for doc.env: if normal binding failed (e.g. the next line is a
+    -- call that is filtered from sources), bind to the innermost enclosing
+    -- function node so file-level scope is not accidentally triggered.
+    for _, doc in ipairs(binded) do
+        if doc.type == 'doc.env' and not doc.bindSource then
+            for i = #sources, 1, -1 do
+                local src = sources[i]
+                if src.type == 'function'
+                and src.start <= doc.start
+                and src.finish >= doc.finish then
+                    bindDocWithSource(doc, src)
+                    break
+                end
+            end
+        end
     end
 end
 

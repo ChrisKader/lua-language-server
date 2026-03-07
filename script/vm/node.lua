@@ -15,7 +15,6 @@ vm.nodeCache = setmetatable({}, util.MODE_K)
 ---@field [integer] vm.node.object
 ---@field [vm.node.object] true
 ---@field fields? table<vm.node|string, vm.node>
----@field undefinedGlobal boolean?
 ---@field lastInfer? vm.infer
 local mt = {}
 mt.__index    = mt

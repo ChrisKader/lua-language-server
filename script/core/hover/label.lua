@@ -226,7 +226,8 @@ return function (source, oop, level)
     or     source.type == 'integer' then
         return asNumber(source)
     elseif source.type == 'doc.type.name'
-    or     source.type == 'doc.enum.name' then
+    or     source.type == 'doc.enum.name'
+    or     source.type == 'doc.env.name' then
         return asDocTypeName(source)
     elseif source.type == 'doc.field' then
         return asDocFieldName(source)

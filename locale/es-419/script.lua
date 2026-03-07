@@ -370,6 +370,8 @@ PARSER_LUADOC_ERROR_DIAG_MODE          =
 '<diagnostic mode> incorrect.'
 PARSER_LUADOC_MISS_LOCAL_NAME          =
 'Se esperaba <local name>.'
+PARSER_LUADOC_MISS_ENV_NAME             =
+'Se esperaba el <nombre de la clase de entorno>.'
 
 SYMBOL_ANONYMOUS       =
 '<Anonymous>'
@@ -1343,5 +1345,40 @@ local miPerro = {}
 
 ---Permitido dado que la función es protegida y no privada.
 myDog:conteoDeOjos();
+```
+]=]
+
+LUADOC_DESC_ENV =
+[=[
+Specify a custom environment class for a file, block, or function. Any global
+lookup within scope will be resolved against the named class instead of the
+standard global environment.
+
+If the class inherits from `_G` (e.g. `---@class myenv : _G`), all standard
+globals remain available. Without `_G` inheritance, only fields defined on the
+class are accessible as globals.
+
+## Syntax
+`@env <class_name>`
+
+## Usage
+### File-level sandbox
+```lua
+---@class myenv : _G
+---@field custom_var number
+
+---@env myenv
+print(custom_var) -- OK: custom_var is defined in myenv, print from _G
+```
+### Function-level sandbox (no _G)
+```lua
+---@class sandbox
+---@field log fun(msg: string)
+
+local function run()
+    ---@env sandbox
+    log("hello")  -- OK
+    print("hi")   -- undefined-global: print is not in sandbox
+end
 ```
 ]=]

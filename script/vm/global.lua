@@ -594,6 +594,25 @@ local function checkIsUndefinedGlobal(src)
     end
 
     local uri = guide.getUri(src)
+
+    -- When an ---@env annotation is active, check the env class for the key.
+    -- If not found and the class does not inherit _G, report undefined.
+    -- If it does inherit _G, fall through to the standard checks below.
+    local envType = vm.getEnvType(src)
+    if envType then
+        local found = false
+        vm.getClassFields(uri, envType, key, function ()
+            found = true
+        end)
+        if found then
+            return false
+        end
+        if not vm.isSubType(uri, envType.name, '_G') then
+            return true
+        end
+        -- env inherits _G: fall through
+    end
+
     local rspecial = config.get(uri, 'Lua.runtime.special')
     if rspecial[key] then
         return false
@@ -618,11 +637,13 @@ end
 ---@param src parser.object
 ---@return boolean
 function vm.isUndefinedGlobal(src)
-    local node = vm.compileNode(src)
-    if node.undefinedGlobal == nil then
-        node.undefinedGlobal = checkIsUndefinedGlobal(src)
+    -- Cache on the source rather than the VM node: the node can be shared
+    -- across getglobal sources (cover=true in setNode), which would allow
+    -- one source's env context to contaminate another source's result.
+    if src._undefinedGlobal == nil then
+        src._undefinedGlobal = checkIsUndefinedGlobal(src)
     end
-    return node.undefinedGlobal
+    return src._undefinedGlobal
 end
 
 ---@param source parser.object
