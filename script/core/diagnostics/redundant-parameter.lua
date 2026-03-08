@@ -19,8 +19,23 @@ return function (uri, callback)
             return
         end
 
-        local funcNode = vm.compileNode(source.node)
-        local _, funcArgs = vm.countParamsOfNode(funcNode)
+        local candidates = vm.getCallableCandidates(source.node, source.args)
+        if not candidates then
+            return
+        end
+        local funcArgs
+        for _, candidate in ipairs(candidates) do
+            local _, cmax = vm.countParamsOfFunction(candidate.func)
+            if cmax ~= math.huge then
+                cmax = math.max(0, cmax - candidate.shift)
+            end
+            if not funcArgs or cmax > funcArgs then
+                funcArgs = cmax
+            end
+        end
+        if not funcArgs then
+            return
+        end
 
         if callArgs <= funcArgs then
             return

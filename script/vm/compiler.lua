@@ -910,6 +910,100 @@ end
 
 ---@param source parser.object
 ---@return vm.global?
+local function resolveEnvTypeFromTypeUnit(source)
+    if not source then
+        return nil
+    end
+    if source.type == 'global' and source.cate == 'type' and not guide.isBasicType(source.name) then
+        return source
+    end
+    if source.type == 'doc.type.name'
+    or source.type == 'doc.generic.name' then
+        if source[1] and not guide.isBasicType(source[1]) then
+            return vm.getGlobal('type', source[1])
+        end
+        return nil
+    end
+    if source.type == 'doc.type.sign' then
+        local node = source.node
+        if node and node[1] and not guide.isBasicType(node[1]) then
+            return vm.getGlobal('type', node[1])
+        end
+        return nil
+    end
+    if source.type == 'doc.type' then
+        if not source.types or #source.types ~= 1 then
+            return nil
+        end
+        return resolveEnvTypeFromTypeUnit(source.types[1])
+    end
+    return nil
+end
+
+---@param func parser.object
+---@param callable parser.object
+---@return vm.global?
+local function getEnvTypeFromCallable(func, callable)
+    if not callable then
+        return nil
+    end
+    local hasSelfParam = func.args
+        and func.args[1]
+        and func.args[1][1] == 'self'
+
+    if callable.type == 'doc.type.function' then
+        local arg1 = callable.args and callable.args[1]
+        if arg1
+        and arg1.name
+        and arg1.name[1] == 'self'
+        and arg1.extends then
+            local envType = resolveEnvTypeFromTypeUnit(arg1.extends)
+            if envType then
+                return envType
+            end
+        end
+        -- Best-effort shorthand support for field annotations like:
+        --   ---@field f fun<MyEnv>(): Ret
+        if hasSelfParam
+        and callable.signs
+        and callable.signs[1]
+        and (not callable.args or #callable.args == 0) then
+            return resolveEnvTypeFromTypeUnit(callable.signs[1])
+        end
+        return nil
+    end
+
+    if callable.type == 'doc.type.sign' then
+        if hasSelfParam
+        and callable.node
+        and callable.node[1] == 'function'
+        and callable.signs
+        and callable.signs[1] then
+            return resolveEnvTypeFromTypeUnit(callable.signs[1])
+        end
+    end
+    return nil
+end
+
+---@param func parser.object
+---@param funcNode? vm.node
+---@return vm.global?
+local function getEnvTypeFromFunctionType(func, funcNode)
+    if not func or func.type ~= 'function' then
+        return nil
+    end
+    funcNode = funcNode or vm.compileNode(func)
+    for n in funcNode:eachObject() do
+        local envType = getEnvTypeFromCallable(func, n)
+        if envType then
+            return envType
+        end
+    end
+    return nil
+end
+
+---@param source parser.object
+---@return vm.global?
 local function getEnvType(source)
     local root = guide.getRoot(source)
     if not root then
@@ -930,41 +1024,51 @@ local function getEnvType(source)
         end
     end
 
-    if #docs._envCache == 0 then
-        return nil
-    end
-
     -- Walk up the function chain looking for an ---@env annotation covering source.
     -- (a) bs == func       : annotation bound directly to the function node.
     -- (b) bs inside func   : annotation bound to a statement in the function body.
-    local func = guide.getParentFunction(source)
+    local nearestFunc = guide.getParentFunction(source)
+    local func = nearestFunc
     while func and func.type ~= 'main' do
-        for _, doc in ipairs(docs._envCache) do
-            local bs = doc.bindSource
-            if bs then
-                if bs == func then
-                    return vm.getGlobal('type', doc.env[1])
-                end
-                if bs.type ~= 'function' and guide.getParentFunction(bs) == func then
-                    return vm.getGlobal('type', doc.env[1])
+        if #docs._envCache > 0 then
+            for _, doc in ipairs(docs._envCache) do
+                local bs = doc.bindSource
+                if bs then
+                    if bs == func then
+                        return vm.getGlobal('type', doc.env[1])
+                    end
+                    if bs.type ~= 'function' and guide.getParentFunction(bs) == func then
+                        return vm.getGlobal('type', doc.env[1])
+                    end
                 end
             end
         end
         func = guide.getParentFunction(func)
     end
 
-    -- File-level: skip docs bound to a function node to prevent
-    -- anonymous-function annotations from bleeding to the whole file.
-    for _, doc in ipairs(docs._envCache) do
-        local bs = doc.bindSource
-        if not bs then
-            return vm.getGlobal('type', doc.env[1])
-        end
-        if bs.type ~= 'function' then
-            local bsFunc = guide.getParentFunction(bs)
-            if not bsFunc or bsFunc.type == 'main' then
+    if #docs._envCache > 0 then
+        -- File-level: skip docs bound to a function node to prevent
+        -- anonymous-function annotations from bleeding to the whole file.
+        for _, doc in ipairs(docs._envCache) do
+            local bs = doc.bindSource
+            if not bs then
                 return vm.getGlobal('type', doc.env[1])
             end
+            if bs.type ~= 'function' then
+                local bsFunc = guide.getParentFunction(bs)
+                if not bsFunc or bsFunc.type == 'main' then
+                    return vm.getGlobal('type', doc.env[1])
+                end
+            end
+        end
+    end
+
+    -- Best-effort fallback: when no explicit @env matched, infer env from
+    -- function type annotations on field assignments.
+    if nearestFunc and nearestFunc.type ~= 'main' then
+        local envType = getEnvTypeFromFunctionType(nearestFunc)
+        if envType then
+            return envType
         end
     end
 
@@ -1187,15 +1291,15 @@ end
 
 ---@param arg      parser.object
 ---@param call     parser.object
+---@param callArgs parser.object[]?
 ---@param callNode vm.node
----@param fixIndex integer
 ---@param myIndex  integer
-local function compileCallArgNode(arg, call, callNode, fixIndex, myIndex)
+local function compileCallArgNode(arg, call, callArgs, callNode, myIndex)
     ---@type integer?, table<any, boolean>?
     local eventIndex, eventMap
-    if call.args then
+    if callArgs then
         for i = 1, 10 do
-            local eventArg = call.args[i + fixIndex]
+            local eventArg = callArgs[i]
             if not eventArg then
                 break
             end
@@ -1261,11 +1365,11 @@ local function compileCallArgNode(arg, call, callNode, fixIndex, myIndex)
                         ---@cast fn parser.object
                         if sign then
                             local generic = vm.createGeneric(fn, sign)
-                            local args    = {}
-                            for i = fixIndex + 1, myIndex - 1 do
-                                args[#args+1] = call.args[i]
+                            local genericArgs = {}
+                            for i = 1, myIndex - 1 do
+                                genericArgs[#genericArgs+1] = callArgs[i]
                             end
-                            local resolvedNode = generic:resolve(guide.getUri(call), args)
+                            local resolvedNode = generic:resolve(guide.getUri(call), genericArgs)
                             vm.setNode(arg, resolvedNode)
                             goto CONTINUE
                         end
@@ -1277,19 +1381,21 @@ local function compileCallArgNode(arg, call, callNode, fixIndex, myIndex)
         end
     end
 
-    for n in callNode:eachObject() do
-        if n.type == 'function' then
-            ---@cast n parser.object
-            dealFunction(n)
-        elseif n.type == 'doc.type.function' then
-            ---@cast n parser.object
-            dealDocFunc(n)
-        elseif n.type == 'global' and n.cate == 'type' then
-            ---@cast n vm.global
-            local overloads = vm.getOverloadsByTypeName(n.name, guide.getUri(arg))
-            if overloads then
-                for _, func in ipairs(overloads) do
-                    dealDocFunc(func)
+    if myIndex > 0 then
+        for n in callNode:eachObject() do
+            if n.type == 'function' then
+                ---@cast n parser.object
+                dealFunction(n)
+            elseif n.type == 'doc.type.function' then
+                ---@cast n parser.object
+                dealDocFunc(n)
+            elseif n.type == 'global' and n.cate == 'type' then
+                ---@cast n vm.global
+                local overloads = vm.getOverloadsByTypeName(n.name, guide.getUri(arg))
+                if overloads then
+                    for _, func in ipairs(overloads) do
+                        dealDocFunc(func)
+                    end
                 end
             end
         end
@@ -1313,15 +1419,34 @@ function vm.compileCallArg(arg, call, index)
         end
     end
 
-    local callNode = vm.compileNode(call.node)
-    compileCallArgNode(arg, call, callNode, 0, index)
+    local candidates = vm.getCallableCandidates(call.node, call.args)
+    if candidates then
+        for _, candidate in ipairs(candidates) do
+            local callNode = vm.createNode()
+            callNode:merge(candidate.func)
+            compileCallArgNode(arg, call, candidate.args or call.args, callNode, index + candidate.shift)
+        end
+    end
 
     if call.node.special == 'pcall'
     or call.node.special == 'xpcall' then
         local fixIndex = call.node.special == 'pcall' and 1 or 2
         if call.args and call.args[1] then
-            callNode = vm.compileNode(call.args[1])
-            compileCallArgNode(arg, call, callNode, fixIndex, index - fixIndex)
+            local realIndex = index - fixIndex
+            if realIndex > 0 then
+                local subArgs = {}
+                for i = fixIndex + 1, #call.args do
+                    subArgs[#subArgs+1] = call.args[i]
+                end
+                local pCandidates = vm.getCallableCandidates(call.args[1], subArgs)
+                if pCandidates then
+                    for _, candidate in ipairs(pCandidates) do
+                        local callNode = vm.createNode()
+                        callNode:merge(candidate.func)
+                        compileCallArgNode(arg, call, candidate.args or subArgs, callNode, realIndex + candidate.shift)
+                    end
+                end
+            end
         end
     end
     return vm.getNode(arg)
@@ -1373,6 +1498,39 @@ local function compileForVars(source, target)
         end
     end
     return false
+end
+
+---@param func parser.object
+---@return vm.node?
+local function getAssignedFunctionOwnerNode(func)
+    local parent = func.parent
+    if not parent then
+        return nil
+    end
+    if not guide.isAssign(parent) or parent.value ~= func or not parent.node then
+        return nil
+    end
+    local ownerNode = vm.compileNode(parent.node)
+    if ownerNode:isEmpty() then
+        return nil
+    end
+    local classLike = vm.createNode()
+    for n in ownerNode:eachObject() do
+        if n.type == 'global'
+        and n.cate == 'type'
+        and not guide.isBasicType(n.name) then
+            classLike:merge(n)
+        elseif n.type == 'doc.type.sign'
+        and n.node
+        and n.node[1]
+        and not guide.isBasicType(n.node[1]) then
+            classLike:merge(n)
+        end
+    end
+    if not classLike:isEmpty() then
+        return classLike
+    end
+    return ownerNode
 end
 
 ---@param func parser.object
@@ -1435,6 +1593,19 @@ local function compileFunctionParam(func, source)
             end
         end
         if found then
+            return true
+        end
+    end
+
+    if source[1] == 'self' and aindex == 1 then
+        local ownerNode = getAssignedFunctionOwnerNode(func)
+        if ownerNode then
+            vm.setNode(source, ownerNode)
+            return true
+        end
+        local envType = getEnvTypeFromFunctionType(func, funcNode)
+        if envType then
+            vm.setNode(source, envType)
             return true
         end
     end
@@ -2314,23 +2485,12 @@ local compilerSwitch = util.switch()
             vm.setNode(source, vm.compileNode(ast))
             return
         end
-        local funcNode = vm.compileNode(func)
-        ---@type vm.node?
-        for nd in funcNode:eachObject() do
-            if nd.type == 'function'
-            or nd.type == 'doc.type.function' then
-                ---@cast nd parser.object
-                bindReturnOfFunction(source, nd, index, args)
-            elseif nd.type == 'global' and nd.cate == 'type' then
-                ---@cast nd vm.global
-                for _, set in ipairs(nd:getSets(guide.getUri(source))) do
-                    if set.type == 'doc.class' then
-                        for _, overload in ipairs(set.calls) do
-                            bindReturnOfFunction(source, overload.overload, index, args)
-                        end
-                    end
-                end
-            end
+        local candidates = vm.getCallableCandidates(func, args)
+        if not candidates then
+            return
+        end
+        for _, candidate in ipairs(candidates) do
+            bindReturnOfFunction(source, candidate.func, index, candidate.args or args)
         end
     end)
     : case 'main'

@@ -5169,3 +5169,202 @@ local mylist
 
 local <?result?> = mylist:identity()
 ]]
+
+TEST 'boolean' [[
+---@class CallableClass
+local obj = setmetatable({}, {
+    ---@param self CallableClass
+    ---@param a string
+    ---@param b number
+    ---@return boolean
+    __call = function(self, a, b)
+        return true
+    end
+})
+
+local <?result?> = obj("hello", 42)
+]]
+
+TEST 'integer' [[
+---@class testenv4
+local testenv4 = setmetatable({
+  test1 = 1,
+  test2 = "2",
+  test3 = false,
+}, { __index = _G })
+
+---@class testtable1Class
+---@field test_table_fun1 fun<testenv4>(): integer
+---@field test_table_fun2 function<testenv4>
+local testtable1 = {
+  test_table_fun1 = function() return testenv4.test1 end,
+  test_table_fun2 = function() return test2 end,
+  test_table_fun3 = function() --[=[@env testenv4]=] return test3 end,
+}
+
+local <?result?> = testtable1.test_table_fun1()
+]]
+
+TEST 'boolean' [[
+---@class testenv4
+local testenv4 = setmetatable({
+  test1 = 1,
+  test2 = "2",
+  test3 = false,
+}, { __index = _G })
+
+local testtable1 = {
+  test_table_fun3 = function() --[=[@env testenv4]=] return test3 end,
+}
+
+local <?result?> = testtable1.test_table_fun3()
+]]
+
+TEST 'unknown' [[
+---@class testenv4
+local testenv4 = setmetatable({
+  test3 = false,
+}, { __index = _G })
+
+local testtable1 = {
+  test_table_fun3 = function() --[=[@env testenv4]=] return test3 end,
+}
+
+local <?result?> = test3
+]]
+
+TEST 'testtable1Class' [[
+---@class testenv4
+local testenv4 = setmetatable({
+  test1 = 1,
+  test2 = "2",
+  test3 = false,
+}, { __index = _G })
+
+---@class testtable1Class
+---@field test_table_fun1 fun<testenv4>(): integer
+---@field test_table_fun2 function<testenv4>
+local testtable1 = {
+  test_table_fun1 = function(self) return <?self?> end,
+  test_table_fun2 = function(self) return self end,
+}
+]]
+
+TEST 'integer' [[
+---@class testenv4
+local testenv4 = setmetatable({
+  test1 = 1,
+  test2 = "2",
+  test3 = false,
+}, { __index = _G })
+
+---@class testtable1Class
+---@field test_table_fun1 fun<testenv4>(): integer
+---@field test_table_fun2 function<testenv4>
+local testtable1 = {
+  test_table_fun1 = function(self) return <?test1?> end,
+  test_table_fun2 = function(self) return test2 end,
+}
+]]
+
+TEST 'string' [[
+---@class testenv4
+local testenv4 = setmetatable({
+  test1 = 1,
+  test2 = "2",
+  test3 = false,
+}, { __index = _G })
+
+---@class testtable1Class
+---@field test_table_fun1 fun<testenv4>(): integer
+---@field test_table_fun2 function<testenv4>
+local testtable1 = {
+  test_table_fun1 = function(self) return test1 end,
+  test_table_fun2 = function(self) return <?test2?> end,
+}
+]]
+
+TEST 'integer' [[
+---@class testenv4
+local testenv4 = setmetatable({
+  test1 = 1,
+  test2 = "2",
+  test3 = false,
+}, { __index = _G })
+
+---@class testtable1Class
+---@field test_table_fun1 fun<testenv4>(): integer
+---@field test_table_fun2 function<testenv4>
+local testtable1 = {
+  test_table_fun1 = function(self) return test1 end,
+  test_table_fun2 = function(self) return test2 end,
+}
+
+local <?result?> = testtable1.test_table_fun1()
+]]
+
+TEST 'unknown' [[
+---@class testenv4
+local testenv4 = setmetatable({
+  test1 = 1,
+  test2 = "2",
+  test3 = false,
+}, { __index = _G })
+
+---@class testtable1Class
+---@field test_table_fun1 fun<testenv4>(): integer
+---@field test_table_fun2 function<testenv4>
+local testtable1 = {
+  test_table_fun1 = function(self) return test1 end,
+  test_table_fun2 = function(self) return test2 end,
+}
+
+local <?result?> = testtable1.test_table_fun2()
+]]
+
+TEST 'testtable1Class' [[
+---@class testenv4
+local testenv4 = setmetatable({
+  test1 = 1,
+  test2 = "2",
+  test3 = false,
+}, { __index = _G })
+
+---@class testtable1Class
+---@field test_table_fun1 fun<testenv4>(): integer
+---@field test_table_fun2 function<testenv4>
+local testtable1 = {
+  test_table_fun1 = function(<?self?>) return test1 end,
+  test_table_fun2 = function(self) return test2 end,
+}
+]]
+
+TEST 'integer' [[
+---@class envA
+---@field v integer
+
+---@class envB
+---@field v string
+
+---@env envA
+
+---@class holder
+---@field f function<envB>
+local t = {
+  f = function(self) return <?v?> end,
+}
+]]
+
+TEST 'integer' [[
+---@class envA
+---@field v integer
+
+---@class envB
+---@field v string
+
+---@class holder
+---@field f function<envB>
+local t = {
+  f = function(self) --[=[@env envA]=] return <?v?> end,
+}
+]]

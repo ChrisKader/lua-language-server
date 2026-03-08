@@ -42,13 +42,55 @@ local function findNearCall(uri, ast, pos)
 end
 
 ---@async
-local function makeOneSignature(source, oop, index)
+local function makeOneSignature(source, oop, index, hiddenArgs)
     local label = hoverLabel(source, oop, 0)
     if not label then
         return nil
     end
     -- 去掉返回值
     label = label:gsub('%s*->.+', '')
+
+    if hiddenArgs and hiddenArgs > 0 then
+        local argStart, argLabel = label:match '()(%b())$'
+        if argStart and argLabel then
+            local raw = argLabel:sub(2, -2)
+            local converted = raw
+                :gsub('%b<>', function (str)
+                    return ('_'):rep(#str)
+                end)
+                :gsub('%b()', function (str)
+                    return ('_'):rep(#str)
+                end)
+                :gsub('%b{}', function (str)
+                    return ('_'):rep(#str)
+                end)
+                :gsub ('%b[]', function (str)
+                    return ('_'):rep(#str)
+                end)
+            local parts = {}
+            local last = 1
+            for i = 1, #converted do
+                if converted:sub(i, i) == ',' then
+                    parts[#parts+1] = raw:sub(last, i - 1):match('^%s*(.-)%s*$')
+                    last = i + 1
+                end
+            end
+            if #raw > 0 then
+                parts[#parts+1] = raw:sub(last):match('^%s*(.-)%s*$')
+            end
+            if #parts > 0 then
+                for _ = 1, hiddenArgs do
+                    table.remove(parts, 1)
+                end
+                local newArgLabel = '(' .. table.concat(parts, ', ') .. ')'
+                label = label:sub(1, argStart - 1) .. newArgLabel
+            end
+        end
+        if index then
+            index = math.max(1, index - hiddenArgs)
+        end
+    end
+
     local params = {}
     local i = 0
     local argStart, argLabel = label:match '()(%b())$'
@@ -93,13 +135,13 @@ local function makeOneSignature(source, oop, index)
     }
 end
 
-local function isEventNotMatch(call, src)
-    if not call.args or not src.args then
+local function isEventNotMatch(callArgs, src)
+    if not callArgs or not src.args then
         return false
     end
     local literal, index
-    for i = 1, #call.args do
-        literal = guide.getLiteral(call.args[i])
+    for i = 1, #callArgs do
+        literal = guide.getLiteral(callArgs[i])
         if literal then
             index = i
             break
@@ -172,32 +214,28 @@ local function makeSignatures(text, call, pos)
         end
     end
     local signs = {}
-    local node = vm.compileNode(func)
-    ---@type vm.node
-    node = node.originNode or node
     local mark = {}
-    for src in node:eachObject() do
-        if (src.type == 'function' and not vm.isVarargFunctionWithOverloads(src))
-        or src.type == 'doc.type.function' then
-            if  not mark[src]
-            and not isEventNotMatch(call, src) then
-                mark[src] = true
-                signs[#signs+1] = makeOneSignature(src, oop, index)
-            end
-        elseif src.type == 'global' and src.cate == 'type' then
-            ---@cast src vm.global
-            for _, set in ipairs(src:getSets(guide.getUri(call))) do
-                if set.type == 'doc.class' then
-                    for _, overload in ipairs(set.calls) do
-                        local f = overload.overload
-                        if  not mark[f]
-                        and not isEventNotMatch(call, src) then
-                            mark[f] = true
-                            signs[#signs+1] = makeOneSignature(f, oop, index)
-                        end
-                    end
-                end
-            end
+    local candidates = vm.getCallableCandidates(func, call.args, true)
+    if not candidates then
+        return signs
+    end
+    for _, candidate in ipairs(candidates) do
+        local src = candidate.func
+        local shiftMark = mark[candidate.shift]
+        if not shiftMark then
+            shiftMark = {}
+            mark[candidate.shift] = shiftMark
+        end
+        if  not shiftMark[src]
+        and not isEventNotMatch(candidate.args or call.args, src)
+        and ((src.type ~= 'function') or not vm.isVarargFunctionWithOverloads(src)) then
+            shiftMark[src] = true
+            signs[#signs+1] = makeOneSignature(
+                src,
+                oop and candidate.shift == 0,
+                index and (index + candidate.shift) or index,
+                candidate.shift
+            )
         end
     end
     return signs

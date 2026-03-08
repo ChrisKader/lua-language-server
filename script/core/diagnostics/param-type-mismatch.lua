@@ -66,16 +66,18 @@ local function getReceiverGenericMap(uri, source)
     return nil
 end
 
----@param funcNode vm.node
+---@param candidates vm.callable.candidate[]
 ---@param i integer
 ---@param classGenericMap table<string, vm.node>?
 ---@return vm.node?
-local function getDefNode(funcNode, i, classGenericMap)
+local function getDefNode(candidates, i, classGenericMap)
     local defNode = vm.createNode()
-    for src in funcNode:eachObject() do
+    for _, candidate in ipairs(candidates) do
+        local src = candidate.func
         if src.type == 'function'
         or src.type == 'doc.type.function' then
-            local param = src.args and src.args[i]
+            local argIndex = i + candidate.shift
+            local param = src.args and src.args[argIndex]
             if param then
                 local paramNode = vm.compileNode(param)
                 -- Check for global type references that match class generic params
@@ -108,15 +110,17 @@ local function getDefNode(funcNode, i, classGenericMap)
     return defNode
 end
 
----@param funcNode vm.node
+---@param candidates vm.callable.candidate[]
 ---@param i integer
 ---@return vm.node
-local function getRawDefNode(funcNode, i)
+local function getRawDefNode(candidates, i)
     local defNode = vm.createNode()
-    for f in funcNode:eachObject() do
+    for _, candidate in ipairs(candidates) do
+        local f = candidate.func
         if f.type == 'function'
         or f.type == 'doc.type.function' then
-            local param = f.args and f.args[i]
+            local argIndex = i + candidate.shift
+            local param = f.args and f.args[argIndex]
             if param then
                 defNode:merge(vm.compileNode(param))
             end
@@ -138,7 +142,10 @@ return function (uri, callback)
             return
         end
         await.delay()
-        local funcNode = vm.compileNode(source.node)
+        local candidates = vm.getCallableCandidates(source.node, source.args)
+        if not candidates then
+            return
+        end
         -- Get the class generic map for method calls on generic class instances
         local classGenericMap = getReceiverGenericMap(uri, source)
         for i, arg in ipairs(source.args) do
@@ -146,7 +153,7 @@ return function (uri, callback)
             if not refNode then
                 goto CONTINUE
             end
-            local defNode = getDefNode(funcNode, i, classGenericMap)
+            local defNode = getDefNode(candidates, i, classGenericMap)
             if not defNode then
                 goto CONTINUE
             end
@@ -159,7 +166,7 @@ return function (uri, callback)
             end
             local errs = {}
             if not vm.canCastType(uri, defNode, refNode, errs) then
-                local rawDefNode = getRawDefNode(funcNode, i)
+                local rawDefNode = getRawDefNode(candidates, i)
                 assert(errs)
                 callback {
                     start   = arg.start,

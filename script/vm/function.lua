@@ -3,6 +3,11 @@ local vm    = require 'vm.vm'
 local guide = require 'parser.guide'
 local util  = require 'utility'
 
+---@class vm.callable.candidate
+---@field func parser.object
+---@field shift integer
+---@field args parser.object[]?
+
 ---@param arg parser.object
 ---@return parser.object?
 local function getDocParam(arg)
@@ -16,6 +21,283 @@ local function getDocParam(arg)
         end
     end
     return nil
+end
+
+---@param source parser.object
+---@return parser.object?
+local function getSetMetatableCall(source)
+    local mark = {}
+    while source and not mark[source] do
+        mark[source] = true
+        if source.type == 'call'
+        and source.node
+        and source.node.special == 'setmetatable' then
+            return source
+        end
+        if source.type == 'call.return'
+        and source.func
+        and source.func.special == 'setmetatable' then
+            local call = source.func.parent
+            if call and call.type == 'call' then
+                return call
+            end
+        end
+        local value = source.value
+        if value and value.type == 'call'
+        and value.node
+        and value.node.special == 'setmetatable' then
+            return value
+        end
+        if value and value.type == 'select'
+        and value.vararg
+        and value.vararg.type == 'call'
+        and value.vararg.node
+        and value.vararg.node.special == 'setmetatable' then
+            return value.vararg
+        end
+        if source.type == 'getlocal'
+        or source.type == 'setlocal'
+        or source.type == 'getglobal'
+        or source.type == 'setglobal' then
+            source = source.node
+        else
+            break
+        end
+    end
+    return nil
+end
+
+---@param source parser.object
+---@param key string
+---@param pushResult fun(field: parser.object)
+local function eachField(source, key, pushResult)
+    vm.compileByParentNodeAll(source, key, function (field)
+        if field then
+            pushResult(field)
+        end
+    end)
+end
+
+---@param field parser.object
+---@param pushResult fun(func: parser.object)
+local function eachCallableFunctionInField(field, pushResult)
+    local node = vm.compileNode(field)
+    for n in node:eachObject() do
+        if n.type == 'function'
+        or n.type == 'doc.type.function' then
+            ---@cast n parser.object
+            pushResult(n)
+        end
+    end
+end
+
+---@param func parser.object
+---@param args parser.object[]?
+---@return parser.object[]?
+local function createShiftedArgs(func, args)
+    if not args then
+        return nil
+    end
+    local newArgs = { func }
+    for _, arg in ipairs(args) do
+        newArgs[#newArgs+1] = arg
+    end
+    return newArgs
+end
+
+---@param func parser.object
+---@return boolean
+local function isWeakMetaCallDocFunction(func)
+    if func.type ~= 'doc.type.function' then
+        return false
+    end
+    if not vm.isMetaFile(guide.getUri(func)) then
+        return false
+    end
+    local parent = func.parent
+    while parent do
+        if parent.type == 'doc.field' then
+            local key = guide.getKeyName(parent)
+            return key == '__call'
+        end
+        parent = parent.parent
+    end
+    return false
+end
+
+---@param func parser.object
+---@param args parser.object[]?
+---@param useOriginNode? boolean
+---@return vm.callable.candidate[]?
+function vm.getCallableCandidates(func, args, useOriginNode)
+    local suri = guide.getUri(func)
+    ---@type vm.callable.candidate[]
+    local results = {}
+    local markCallable = {}
+    local markObject = {}
+    local markClass = {}
+
+    ---@param callable parser.object
+    ---@param shift integer
+    local function pushCallable(callable, shift)
+        local callableMark = markCallable[callable]
+        if not callableMark then
+            callableMark = {}
+            markCallable[callable] = callableMark
+        end
+        if callableMark[shift] then
+            return
+        end
+        callableMark[shift] = true
+        results[#results+1] = {
+            func  = callable,
+            shift = shift,
+            args  = shift == 1 and createShiftedArgs(func, args) or args,
+        }
+    end
+
+    ---@param class vm.global
+    local function resolveClass(class)
+        if class.cate ~= 'type' then
+            return
+        end
+        if markClass[class.name] then
+            return
+        end
+        markClass[class.name] = true
+
+        for _, set in ipairs(class:getSets(suri)) do
+            if set.type ~= 'doc.class' then
+                goto CONTINUE
+            end
+
+            for _, overload in ipairs(set.calls) do
+                pushCallable(overload.overload, 0)
+            end
+
+            vm.getClassFields(suri, class, '__call', function (field)
+                eachCallableFunctionInField(field, function (callable)
+                    pushCallable(callable, 1)
+                end)
+            end)
+
+            if set.bindSource then
+                local smtCall = getSetMetatableCall(set.bindSource)
+                if smtCall and smtCall.args and smtCall.args[2] then
+                    local mt = smtCall.args[2]
+                    if not markObject[mt] then
+                        markObject[mt] = true
+                        eachField(mt, '__call', function (field)
+                            eachCallableFunctionInField(field, function (callable)
+                                pushCallable(callable, 1)
+                            end)
+                        end)
+                    end
+                end
+            end
+
+            if set.extends then
+                for _, ext in ipairs(set.extends) do
+                    if ext.type == 'doc.extends.name' and ext[1] then
+                        local extClass = vm.getGlobal('type', ext[1])
+                        if extClass then
+                            resolveClass(extClass)
+                        end
+                    end
+                end
+            end
+
+            ::CONTINUE::
+        end
+    end
+
+    ---@param source parser.object
+    ---@param depth integer
+    local function resolveSource(source, depth)
+        if depth > 12 then
+            return
+        end
+        if markObject[source] then
+            return
+        end
+        markObject[source] = true
+
+        if source.type == 'function'
+        or source.type == 'doc.type.function' then
+            pushCallable(source, 0)
+            return
+        end
+
+        eachField(source, '__call', function (field)
+            eachCallableFunctionInField(field, function (callable)
+                pushCallable(callable, 1)
+            end)
+        end)
+
+        local smtCall = getSetMetatableCall(source)
+        if smtCall and smtCall.args and smtCall.args[2] then
+            resolveSource(smtCall.args[2], depth + 1)
+        end
+
+        eachField(source, '__index', function (field)
+            for indexObj in vm.compileNode(field):eachObject() do
+                if indexObj.type == 'global'
+                and indexObj.cate == 'type' then
+                    ---@cast indexObj vm.global
+                    resolveClass(indexObj)
+                elseif indexObj.type ~= 'function'
+                and indexObj.type ~= 'doc.type.function'
+                and indexObj.type ~= 'doc.type'
+                and not guide.isLiteral(indexObj) then
+                    ---@cast indexObj parser.object
+                    resolveSource(indexObj, depth + 1)
+                end
+            end
+        end)
+    end
+
+    ---@type vm.node
+    local node = vm.compileNode(func)
+    if useOriginNode then
+        node = node.originNode or node
+    end
+    for n in node:eachObject() do
+        if n.type == 'function'
+        or n.type == 'doc.type.function' then
+            ---@cast n parser.object
+            pushCallable(n, 0)
+        elseif n.type == 'global'
+        and n.cate == 'type' then
+            ---@cast n vm.global
+            resolveClass(n)
+        elseif n.type ~= 'doc.type'
+        and not guide.isLiteral(n) then
+            ---@cast n parser.object
+            resolveSource(n, 0)
+        end
+    end
+
+    local hasFunctionByShift = {}
+    for _, candidate in ipairs(results) do
+        if candidate.func.type == 'function' then
+            hasFunctionByShift[candidate.shift] = true
+        end
+    end
+    if next(hasFunctionByShift) then
+        for i = #results, 1, -1 do
+            local candidate = results[i]
+            if candidate.func.type == 'doc.type.function'
+            and hasFunctionByShift[candidate.shift]
+            and isWeakMetaCallDocFunction(candidate.func) then
+                table.remove(results, i)
+            end
+        end
+    end
+
+    if #results == 0 then
+        return nil
+    end
+    return results
 end
 
 ---@param func parser.object
@@ -267,14 +549,14 @@ end
 ---@return number  max
 ---@return integer def
 function vm.countReturnsOfCall(func, args, mark)
-    local funcs = vm.getMatchedFunctions(func, args, mark)
-    if not funcs then
+    local candidates = vm.getMatchedCallableCandidates(func, args, mark)
+    if not candidates then
         return 0, math.huge, 0
     end
     ---@type integer?, number?, integer?
     local min, max, def
-    for _, f in ipairs(funcs) do
-        local rmin, rmax, rdef = vm.countReturnsOfFunction(f, false, mark)
+    for _, candidate in ipairs(candidates) do
+        local rmin, rmax, rdef = vm.countReturnsOfFunction(candidate.func, false, mark)
         if not min or rmin < min then
             min = rmin
         end
@@ -358,15 +640,16 @@ end
 ---@param func parser.object
 ---@return number
 local function calcFunctionMatchScore(uri, args, func)
+    local matchArgs = args
     if vm.isVarargFunctionWithOverloads(func)
     or vm.isFunctionWithOnlyOverloads(func)
-    or not isAllParamMatched(uri, args, func.args)
+    or not isAllParamMatched(uri, matchArgs, func.args)
     then
         return -1
     end
     local matchScore = 0
-    for i = 1, math.min(#args, #func.args) do
-        local arg, param = args[i], func.args[i]
+    for i = 1, math.min(#matchArgs, #func.args) do
+        local arg, param = matchArgs[i], func.args[i]
         local defLiterals, literalsCount = vm.getLiterals(param)
         if defLiterals then
             for n in vm.compileNode(arg):eachObject() do
@@ -385,19 +668,19 @@ end
 
 ---@param func parser.object
 ---@param args? parser.object[]
----@return parser.object[]?
-function vm.getExactMatchedFunctions(func, args)
-    local funcs = vm.getMatchedFunctions(func, args)
-    if not args or not funcs then
-        return funcs
+---@return vm.callable.candidate[]?
+function vm.getExactMatchedCallableCandidates(func, args)
+    local candidates = vm.getMatchedCallableCandidates(func, args)
+    if not args or not candidates then
+        return candidates
     end
-    if #funcs == 1 then
-        return funcs
+    if #candidates == 1 then
+        return candidates
     end
     local uri = guide.getUri(func)
     local matchScores = {}
-    for i, n in ipairs(funcs) do
-        matchScores[i] = calcFunctionMatchScore(uri, args, n)
+    for i, candidate in ipairs(candidates) do
+        matchScores[i] = calcFunctionMatchScore(uri, candidate.args or args, candidate.func)
     end
 
     local maxMatchScore = math.max(table.unpack(matchScores))
@@ -409,7 +692,7 @@ function vm.getExactMatchedFunctions(func, args)
     local minMatchScore = math.min(table.unpack(matchScores))
     if minMatchScore == maxMatchScore then
         -- all should be kept
-        return funcs
+        return candidates
     end
 
     -- remove functions that have matchScore < maxMatchScore
@@ -419,8 +702,54 @@ function vm.getExactMatchedFunctions(func, args)
             needRemove[#needRemove + 1] = i
         end
     end
-    util.tableMultiRemove(funcs, needRemove)
+    util.tableMultiRemove(candidates, needRemove)
+    return candidates
+end
+
+---@param func parser.object
+---@param args? parser.object[]
+---@return parser.object[]?
+function vm.getExactMatchedFunctions(func, args)
+    local candidates = vm.getExactMatchedCallableCandidates(func, args)
+    if not candidates then
+        return nil
+    end
+    local funcs = {}
+    local mark = {}
+    for _, candidate in ipairs(candidates) do
+        local cfunc = candidate.func
+        if not mark[cfunc] then
+            mark[cfunc] = true
+            funcs[#funcs+1] = cfunc
+        end
+    end
     return funcs
+end
+
+---@param func parser.object
+---@param args? parser.object[]
+---@param mark? table
+---@return vm.callable.candidate[]?
+function vm.getMatchedCallableCandidates(func, args, mark)
+    local candidates = vm.getCallableCandidates(func, args)
+    if not candidates then
+        return nil
+    end
+
+    local matched = {}
+    for _, candidate in ipairs(candidates) do
+        local cargs = candidate.args or args
+        local amin, amax = vm.countList(cargs, mark)
+        local min, max = vm.countParamsOfFunction(candidate.func)
+        if amin >= min and amax <= max then
+            matched[#matched+1] = candidate
+        end
+    end
+
+    if #matched == 0 then
+        return nil
+    end
+    return matched
 end
 
 ---@param func parser.object
@@ -428,30 +757,20 @@ end
 ---@param mark? table
 ---@return parser.object[]?
 function vm.getMatchedFunctions(func, args, mark)
-    local funcs = {}
-    local node = vm.compileNode(func)
-    for n in node:eachObject() do
-        if n.type == 'function'
-        or n.type == 'doc.type.function' then
-            funcs[#funcs+1] = n
-        end
-    end
-
-    local amin, amax = vm.countList(args, mark)
-
-    local matched = {}
-    for _, n in ipairs(funcs) do
-        local min, max = vm.countParamsOfFunction(n)
-        if amin >= min and amax <= max then
-            matched[#matched+1] = n
-        end
-    end
-
-    if #matched == 0 then
+    local candidates = vm.getMatchedCallableCandidates(func, args, mark)
+    if not candidates then
         return nil
-    else
-        return matched
     end
+    local matched = {}
+    local dedupe = {}
+    for _, candidate in ipairs(candidates) do
+        local cfunc = candidate.func
+        if not dedupe[cfunc] then
+            dedupe[cfunc] = true
+            matched[#matched+1] = cfunc
+        end
+    end
+    return matched
 end
 
 ---@param func table
