@@ -2045,7 +2045,10 @@ local function bindDoc(source, binded)
                 ok = true
             end
         elseif doc.type == 'doc.env' then
-            if not isParam then
+            -- Keep @env aligned with setfenv semantics: it applies to the whole
+            -- enclosing function (or file-level if not inside a function),
+            -- rather than binding to nearby statements/fields.
+            if source.type == 'function' then
                 bindDocWithSource(doc, source)
                 ok = true
             end

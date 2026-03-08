@@ -119,3 +119,33 @@ end), {})()
 print("outer2 - ok")
 _G_ref = _G
 ]]
+
+TEST [[
+---@class myenv7
+---@field foo number
+
+local testtable = {
+    run = function() --[=[@env myenv7]=]
+        local x = foo
+        local y = <!print!>
+    end,
+}
+
+print("outer3 - ok")
+]]
+
+TEST [[
+---@class testenv4
+---@field test1 integer
+---@field test2 string
+---@field test3 boolean
+
+---@class testtable1Class
+---@field test_table_fun1 fun<testenv4>(): integer
+---@field test_table_fun2 function<testenv4>
+local testtable1 = {
+    test_table_fun1 = function(self) return test1 end,
+    test_table_fun2 = function(self) return test2 end,
+    test_table_fun3 = function(self) --[=[@env testenv4]=] return test3 end,
+}
+]]
